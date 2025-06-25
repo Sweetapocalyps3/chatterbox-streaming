@@ -222,6 +222,7 @@ class T3(nn.Module):
         length_penalty=1.0,
         repetition_penalty=1.2,
         cfg_weight=0,
+        min_return_tokens: int = 20
     ):
         """
         Args:
@@ -366,6 +367,11 @@ class T3(nn.Module):
             # Update the kv_cache.
             past = output.past_key_values
 
-        # Concatenate all predicted tokens along the sequence dimension.
-        predicted_tokens = torch.cat(predicted, dim=1)  # shape: (B, num_tokens)
-        return predicted_tokens
+            if len(predicted) >= min_return_tokens:
+                yield torch.cat(predicted, dim=1)
+                predicted = []
+
+        if len(predicted) > 0:
+            # Concatenate all predicted tokens along the sequence dimension.
+            predicted_tokens = torch.cat(predicted, dim=1)  # shape: (B, num_tokens)
+            yield predicted_tokens

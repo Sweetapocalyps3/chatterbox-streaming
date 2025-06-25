@@ -215,6 +215,8 @@ class ChatterboxTTS:
         exaggeration=0.5,
         cfg_weight=0.5,
         temperature=0.8,
+        min_return_tokens=20,
+        min_return_seconds=7
     ):
         if audio_prompt_path:
             self.prepare_conditionals(audio_prompt_path, exaggeration=exaggeration)
@@ -242,8 +244,10 @@ class ChatterboxTTS:
         text_tokens = F.pad(text_tokens, (1, 0), value=sot)
         text_tokens = F.pad(text_tokens, (0, 1), value=eot)
 
+        buffer_wavs = []  # Per accumulare i wav troppo brevi
+        buffer_samples = 0
         with torch.inference_mode():
-            speech_tokens = self.t3.inference(
+            for speech_tokens in self.t3.inference(
                 t3_cond=self.conds.t3,
                 text_tokens=text_tokens,
                 max_new_tokens=1000,  # TODO: use the value in config
@@ -252,21 +256,35 @@ class ChatterboxTTS:
                 repetition_penalty=repetition_penalty,
                 min_p=min_p,
                 top_p=top_p,
-            )
-            # Extract only the conditional batch.
-            speech_tokens = speech_tokens[0]
+                min_return_tokens=min_return_tokens,
+            ):
+                # Extract only the conditional batch.
+                speech_tokens = speech_tokens[0]
 
-            # TODO: output becomes 1D
-            speech_tokens = drop_invalid_tokens(speech_tokens)
-            
-            speech_tokens = speech_tokens[speech_tokens < 6561]
+                # TODO: output becomes 1D
+                speech_tokens = drop_invalid_tokens(speech_tokens)
 
-            speech_tokens = speech_tokens.to(self.device)
+                speech_tokens = speech_tokens[speech_tokens < 6561]
 
-            wav, _ = self.s3gen.inference(
-                speech_tokens=speech_tokens,
-                ref_dict=self.conds.gen,
-            )
-            wav = wav.squeeze(0).detach().cpu().numpy()
-            watermarked_wav = self.watermarker.apply_watermark(wav, sample_rate=self.sr)
-        return torch.from_numpy(watermarked_wav).unsqueeze(0)
+                speech_tokens = speech_tokens.to(self.device)
+
+                wav, _ = self.s3gen.inference(
+                    speech_tokens=speech_tokens,
+                    ref_dict=self.conds.gen,
+                )
+                wav = wav.squeeze(0).detach().cpu().numpy()
+                watermarked_wav = self.watermarker.apply_watermark(wav, sample_rate=self.sr)
+
+                buffer_wavs.append(torch.from_numpy(watermarked_wav))
+                buffer_samples += watermarked_wav.shape[-1]
+
+                # Se la durata totale supera i 5 secondi, yield e svuota il buffer
+                if buffer_samples / self.sr >= min_return_seconds:
+                    output_wav = torch.cat(buffer_wavs, dim=-1)
+                    yield output_wav.unsqueeze(0)
+                    buffer_wavs = []
+                    buffer_samples = 0
+
+            if buffer_wavs:
+                output_wav = torch.cat(buffer_wavs, dim=-1)
+                yield output_wav.unsqueeze(0)
